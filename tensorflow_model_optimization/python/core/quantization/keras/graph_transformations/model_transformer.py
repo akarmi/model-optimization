@@ -27,12 +27,13 @@ LayerNode = transforms_mod.LayerNode
 class ModelTransformer(object):
   """Matches patterns to apply transforms in a Keras model graph."""
 
-  def __init__(self, model, transforms):
+  def __init__(self, model, transforms, candidate_layers=None):
     if not (isinstance(model, keras.Model) and model._is_graph_network):  # pylint: disable=protected-access
       raise ValueError('Only Keras functional models can be transformed.')
 
     self.model = model
     self.transforms = transforms
+    self.candidate_layers = candidate_layers
 
   def _get_consuming_layers(self, check_layer):
     """Returns all the layers which are out nodes from the layer."""
@@ -63,6 +64,9 @@ class ModelTransformer(object):
 
   def _match_layer(self, layer, pattern):
     """Check if specific layer matches the pattern."""
+
+    if self.candidate_layers and layer['name'] not in self.candidate_layers:
+      return False
 
     # TODO(pulkitb): Possible changes and extensions to this method.
     # Consider making this case insensitive
@@ -327,8 +331,16 @@ class ModelTransformer(object):
           if not match_layer_node:
             break
 
-          match_found = True
           replacement_layer_node = transform.replacement(match_layer_node)
+
+          # If equal, the matched layers are being replaced with exactly the
+          # same set of layers that were matched with the same config.
+          # For Transforms, that may inadvertently do this we can end up in
+          # an infinite loop. Break if no meaningful change has been made.
+          if match_layer_node == replacement_layer_node:
+            break
+
+          match_found = True
           self._replace(match_layer_node, replacement_layer_node)
 
       # None of the transforms found a pattern. We can stop now.
