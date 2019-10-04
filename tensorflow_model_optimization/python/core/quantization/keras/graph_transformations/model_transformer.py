@@ -27,12 +27,13 @@ LayerNode = transforms_mod.LayerNode
 class ModelTransformer(object):
   """Matches patterns to apply transforms in a Keras model graph."""
 
-  def __init__(self, model, transforms):
+  def __init__(self, model, transforms, candidate_layers=None):
     if not (isinstance(model, keras.Model) and model._is_graph_network):  # pylint: disable=protected-access
       raise ValueError('Only Keras functional models can be transformed.')
 
     self.model = model
     self.transforms = transforms
+    self.candidate_layers = candidate_layers
 
   def _get_consuming_layers(self, check_layer):
     """Returns all the layers which are out nodes from the layer."""
@@ -61,16 +62,28 @@ class ModelTransformer(object):
   def _get_layer_weights(self, layer_name):
     return self._layer_weights_map.get(layer_name, {})
 
+  def _has_wrapper(self, layer):
+    return 'layer' in layer['config']
+
+  def _get_unwrapped_layer(self, layer):
+    return layer['config']['layer']
+
   def _match_layer(self, layer, pattern):
     """Check if specific layer matches the pattern."""
+
+    if self.candidate_layers and layer['name'] not in self.candidate_layers:
+      return False
 
     # TODO(pulkitb): Possible changes and extensions to this method.
     # Consider making this case insensitive
     # Add support for multiple types. (Conv2D|DepthwiseConv2d)
-    if layer['class_name'] != pattern.class_name:
+    #
+    # TODO(tfmot): has_wrapper() check can be removed after using
+    # candidate_layers parameter in callers.
+    if not self._has_wrapper(layer) or self._get_unwrapped_layer(
+        layer)['class_name'] != pattern.class_name:
       return False
-
-    layer_config = layer['config']
+    layer_config = self._get_unwrapped_layer(layer)['config']
     for key, value in pattern.config.items():
       # This comparison should probably use the serialized value.
       # Consider adding regex support to key/values as well. This will allow
@@ -283,6 +296,12 @@ class ModelTransformer(object):
     This is the main entry point function used to apply the transformations to
     the Keras model.
 
+    This requires that each layer in the Keras model is wrapped by a Keras
+    wrapper, which may be used to propagate any data to the transforms that is
+    usecase specific. The wrapper must provide access to the layer via
+    self.layer.
+    TODO(tfmot): formalize this contract.
+
     Not suitable for multi-threaded use. Creates and manipulates internal state.
 
     Returns:
@@ -327,8 +346,16 @@ class ModelTransformer(object):
           if not match_layer_node:
             break
 
-          match_found = True
           replacement_layer_node = transform.replacement(match_layer_node)
+
+          # If equal, the matched layers are being replaced with exactly the
+          # same set of layers that were matched with the same config.
+          # For Transforms, that may inadvertently do this we can end up in
+          # an infinite loop. Break if no meaningful change has been made.
+          if match_layer_node == replacement_layer_node:
+            break
+
+          match_found = True
           self._replace(match_layer_node, replacement_layer_node)
 
       # None of the transforms found a pattern. We can stop now.

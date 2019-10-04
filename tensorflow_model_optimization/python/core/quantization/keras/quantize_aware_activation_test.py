@@ -64,10 +64,10 @@ class QuantizeAwareQuantizationTest(test.TestCase):
     self.assertEqual(
         str(cm.exception), QuantizeAwareActivation._CUSTOM_ACTIVATION_ERR_MSG)
 
-  def testAppliesQuantizationPostActivation(self):
+  def _testAppliesQuantizationPostActivation(self, activation):
     layer = self.TestLayer()
-    layer.activation = QuantizeAwareActivation(
-        activations.get('relu'), self.quantizer, 0, layer)
+    layer.activation = QuantizeAwareActivation(activation, self.quantizer, 0,
+                                               layer)
 
     model = keras.Sequential([layer])
 
@@ -82,10 +82,17 @@ class QuantizeAwareQuantizationTest(test.TestCase):
 
     self.assertAllClose(expected_activation, model.predict(x))
 
-  def testAppliesQuantizationPreAndPostActivation(self):
+  def testAppliesQuantizationPostActivation(self):
+    self._testAppliesQuantizationPostActivation(activations.get('relu'))
+
+  def testAppliesQuantizationPostAdvancedActivation(self):
+    self._testAppliesQuantizationPostActivation(
+        keras.layers.ReLU(max_value=6.0))
+
+  def _testAppliesQuantizationPreAndPostActivation(self, activation):
     layer = self.TestLayer()
-    layer.activation = QuantizeAwareActivation(
-        activations.get('softmax'), self.quantizer, 0, layer)
+    layer.activation = QuantizeAwareActivation(activation, self.quantizer, 0,
+                                               layer)
 
     model = keras.Sequential([layer])
 
@@ -101,6 +108,14 @@ class QuantizeAwareQuantizationTest(test.TestCase):
 
     self.assertAllClose(expected_activation, model.predict(x))
 
+  def testAppliesQuantizationPreAndPostActivation(self):
+    self._testAppliesQuantizationPreAndPostActivation(
+        activations.get('softmax'))
+
+  def testAppliesQuantizationPreAndPostAdvancedActivation(self):
+    self._testAppliesQuantizationPreAndPostActivation(
+        keras.layers.Softmax(axis=-1))
+
   def testSerializationReturnsWrappedActivation_BuiltInActivation(self):
     activation = activations.get('tanh')
     quantize_activation = QuantizeAwareActivation(
@@ -108,7 +123,10 @@ class QuantizeAwareQuantizationTest(test.TestCase):
 
     expected_config = {
         'class_name': 'QuantizeAwareActivation',
-        'config': {'activation': 'tanh'}
+        'config': {
+            'activation': 'tanh',
+            'is_advanced': False
+        }
     }
     serialized_quantize_activation = serialize_keras_object(quantize_activation)
 
@@ -119,6 +137,20 @@ class QuantizeAwareQuantizationTest(test.TestCase):
         custom_objects={'QuantizeAwareActivation': QuantizeAwareActivation})
 
     self.assertEqual(activation, deserialized_activation)
+
+  def testSerializationReturnsWrappedAdvancedActivation_BuiltInActivation(self):
+    activation = keras.layers.ReLU(max_value=6.0)
+    quantize_activation = QuantizeAwareActivation(activation, self.quantizer, 0,
+                                                  self.TestLayer())
+
+    serialized_quantize_activation = serialize_keras_object(quantize_activation)
+
+    deserialized_activation = deserialize_keras_object(
+        serialized_quantize_activation,
+        custom_objects={'QuantizeAwareActivation': QuantizeAwareActivation})
+
+    self.assertEqual(activation.get_config(),
+                     deserialized_activation.get_config())
 
 
 if __name__ == '__main__':
