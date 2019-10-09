@@ -21,6 +21,7 @@ from __future__ import print_function
 import numpy as np
 
 from tensorflow.python import keras
+from tensorflow.python.keras.utils.generic_utils import custom_object_scope
 from tensorflow.python.platform import test
 
 from tensorflow_model_optimization.python.core.quantization.keras.graph_transformations import model_transformer
@@ -30,6 +31,19 @@ ModelTransformer = model_transformer.ModelTransformer
 Transform = transforms.Transform
 LayerPattern = transforms.LayerPattern
 LayerNode = transforms.LayerNode
+
+class SimpleWrapper(keras.layers.Wrapper):
+  """Behaves same as passed in layer."""
+
+  def compute_output_shape(self, input_shape):
+    return self.layer.compute_output_shape(self.layer.input_shape)
+
+  def call(self, inputs, training=None):
+    return self.layer.call(inputs)
+
+def simple_wrapper_scope(*args):
+  objects = {'SimpleWrapper': SimpleWrapper}
+  return custom_object_scope(*(args + (objects,)))
 
 
 class ModelTransformerTest(test.TestCase):
@@ -58,6 +72,18 @@ class ModelTransformerTest(test.TestCase):
     inp = keras.layers.Input((3,))
     x = keras.layers.Dense(2)(inp)
     out = keras.layers.ReLU(6.0)(x)
+    return keras.Model(inp, out)
+
+  def _simple_wrapped_dense_model(self):
+    inp = keras.layers.Input((3,))
+    x = SimpleWrapper(keras.layers.Dense(2))(inp)
+    out = keras.layers.ReLU(6.0)(x)
+    return keras.Model(inp, out)
+
+  def _simple_wrapped_dense_relu_model(self):
+    inp = keras.layers.Input((3,))
+    x = SimpleWrapper(keras.layers.Dense(2))(inp)
+    out = SimpleWrapper(keras.layers.ReLU(6.0))(x)
     return keras.Model(inp, out)
 
   def _assert_config(self, expected_config, actual_config, exclude_keys=None):
@@ -117,7 +143,8 @@ class ModelTransformerTest(test.TestCase):
       return LayerPattern('Dense')
 
     def replacement(self, match_layer):
-      match_layer_config = match_layer.layer['config']
+      unwrapped_layer = match_layer.layer['config']['layer']
+      match_layer_config = unwrapped_layer['config']
       my_dense_layer = self.MyDense(**match_layer_config)
 
       replace_layer = keras.layers.serialize(my_dense_layer)
@@ -129,13 +156,17 @@ class ModelTransformerTest(test.TestCase):
       return {'MyDense': self.MyDense}
 
   def testReplaceSingleLayerWithSingleLayer_OneOccurrence(self):
-    model = self._simple_dense_model()
+    unwrapped_model = self._simple_dense_model()
+    model = self._simple_wrapped_dense_model()
 
     transformed_model = ModelTransformer(
         model, [self.ReplaceDenseLayer()]).transform()
 
-    self._assert_config(model.get_config(), transformed_model.get_config(),
-                        ['class_name'])
+    self._assert_config(unwrapped_model.get_config(),
+                        transformed_model.get_config(), [
+                            'class_name', 'name', 'input_layers',
+                            'output_layers', 'inbound_nodes'
+                        ])
     self.assertEqual('MyDense', transformed_model.layers[1].__class__.__name__)
 
     self._assert_model_results_equal(model, transformed_model)
@@ -146,13 +177,23 @@ class ModelTransformerTest(test.TestCase):
     x2 = keras.layers.Dense(2)(inp)
     out1 = keras.layers.ReLU(6.0)(x1)
     out2 = keras.layers.ReLU(6.0)(x2)
-    model = keras.Model(inp, [out1, out2])
+    unwrapped_model = keras.Model(inp, [out1, out2])
+
+    inp2 = keras.layers.Input((3,))
+    x3 = SimpleWrapper(keras.layers.Dense(2))(inp2)
+    x4 = SimpleWrapper(keras.layers.Dense(2))(inp2)
+    out3 = keras.layers.ReLU(6.0)(x3)
+    out4 = keras.layers.ReLU(6.0)(x4)
+    model = keras.Model(inp2, [out3, out4])
 
     transformed_model = ModelTransformer(
         model, [self.ReplaceDenseLayer()]).transform()
 
-    self._assert_config(model.get_config(), transformed_model.get_config(),
-                        ['class_name'])
+    self._assert_config(unwrapped_model.get_config(),
+                        transformed_model.get_config(), [
+                            'class_name', 'name', 'input_layers',
+                            'output_layers', 'inbound_nodes'
+                        ])
     self.assertEqual('MyDense', transformed_model.layers[1].__class__.__name__)
     self.assertEqual('MyDense', transformed_model.layers[2].__class__.__name__)
 
@@ -166,7 +207,8 @@ class ModelTransformerTest(test.TestCase):
         return LayerPattern('Dense', {'use_bias': True})
 
       def replacement(self, match_layer):
-        match_layer_config = match_layer.layer['config']
+        unwrapped_layer = match_layer.layer['config']['layer']
+        match_layer_config = unwrapped_layer['config']
         # Remove bias
         match_layer_weights = match_layer.weights
         match_layer_weights.popitem()
@@ -179,13 +221,15 @@ class ModelTransformerTest(test.TestCase):
 
         return LayerNode(replace_layer, match_layer_weights, [])
 
-    model = self._simple_dense_model()
+    unwrapped_model = self._simple_dense_model()
+    model = self._simple_wrapped_dense_model()
 
-    transformed_model = ModelTransformer(
-        model, [RemoveBiasInDense()]).transform()
+    transformed_model = ModelTransformer(model,
+                                         [RemoveBiasInDense()]).transform()
 
-    self._assert_config(model.get_config(), transformed_model.get_config(),
-                        ['use_bias'])
+    self._assert_config(
+        unwrapped_model.get_config(), transformed_model.get_config(),
+        ['use_bias', 'name', 'input_layers', 'output_layers', 'inbound_nodes'])
     self.assertFalse(transformed_model.layers[1].use_bias)
 
     # Should match since bias is initialized with zeros.
@@ -203,7 +247,9 @@ class ModelTransformerTest(test.TestCase):
         return LayerPattern('ReLU', inputs=[LayerPattern('Dense')])
 
       def replacement(self, match_layer):
-        dense_layer_config = match_layer.input_layers[0].layer['config']
+        unwrapped_dense_layer = match_layer.input_layers[0].layer['config'][
+            'layer']
+        dense_layer_config = unwrapped_dense_layer['config']
         dense_layer_weights = match_layer.input_layers[0].weights
         dense_layer_config['activation'] = 'relu'
 
@@ -219,8 +265,8 @@ class ModelTransformerTest(test.TestCase):
     model_fused = keras.Model(inp, out)
 
     inp = keras.layers.Input((3,))
-    x = keras.layers.Dense(2)(inp)
-    out = keras.layers.ReLU()(x)
+    x = SimpleWrapper(keras.layers.Dense(2))(inp)
+    out = SimpleWrapper(keras.layers.ReLU())(x)
     model = keras.Model(inp, out)
     model.set_weights(model_fused.get_weights())
 
@@ -248,11 +294,73 @@ class ModelTransformerTest(test.TestCase):
     # TODO(pulkitb): Implement
     pass
 
+  def testDoesNotMatchForever_IfReplacementEqualsMatch(self):
+
+    class ReplaceWithSelf(Transform):
+
+      def pattern(self):
+        return LayerPattern('ReLU', inputs=[LayerPattern('Dense')])
+
+      def replacement(self, match_layer):
+        return match_layer
+
+    model = self._simple_dense_model()
+
+    transformed_model = ModelTransformer(model, [ReplaceWithSelf()]).transform()
+
+    self._assert_config(model.get_config(), transformed_model.get_config())
+
   # Negative Tests
   # TODO(pulkitb): Add negative tests
   # 1. Does not replace if any layer in the pattern has multiple nodes/consumers
   # 2. Adding a single layer clone will lead to infinite loop. Fix and test.
   # 3. Handles layer being part of multiple models.
+
+  class VerifyMatch(Transform):
+
+    def __init__(self, pattern):
+      self._pattern = pattern
+      self._matched = False
+
+    def pattern(self):
+      return self._pattern
+
+    def replacement(self, match_layer):
+      self._matched = True
+      return match_layer
+
+    def matched(self):
+      return self._matched
+
+    def reset(self):
+      self._matched = False
+
+  def testPatternShouldOnlyMatchCandidateLayers(self):
+    pattern = LayerPattern('ReLU', inputs=[LayerPattern('Dense')])
+    transform = self.VerifyMatch(pattern)
+
+    model = self._simple_wrapped_dense_relu_model()
+    layer_names = [layer.name for layer in model.layers]
+
+    with simple_wrapper_scope():
+      # By default matches everything.
+      ModelTransformer(model, [transform]).transform()
+      self.assertTrue(transform.matched())
+
+      # Matches when all layers passed in.
+      transform.reset()
+      ModelTransformer(model, [transform], layer_names).transform()
+      self.assertTrue(transform.matched())
+
+      # Fails. Dense missing.
+      transform.reset()
+      ModelTransformer(model, [transform], [model.layers[-2].name]).transform()
+      self.assertFalse(transform.matched())
+
+      # Fails. ReLU missing.
+      transform.reset()
+      ModelTransformer(model, [transform], [model.layers[-1].name]).transform()
+      self.assertFalse(transform.matched())
 
 
 if __name__ == '__main__':

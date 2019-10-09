@@ -16,12 +16,13 @@
 
 from tensorflow.python import keras
 from tensorflow.python.keras.utils.generic_utils import custom_object_scope
-
 from tensorflow_model_optimization.python.core.quantization.keras import quantize_annotate as quantize_annotate_mod
 from tensorflow_model_optimization.python.core.quantization.keras import quantize_aware_activation
 from tensorflow_model_optimization.python.core.quantization.keras import quantize_wrapper
 from tensorflow_model_optimization.python.core.quantization.keras import quantizers
+from tensorflow_model_optimization.python.core.quantization.keras.graph_transformations import model_transformer
 from tensorflow_model_optimization.python.core.quantization.keras.tflite import tflite_quantize_registry
+from tensorflow_model_optimization.python.core.quantization.keras.tflite import tflite_transforms
 
 
 def quantize_scope(*args):
@@ -179,7 +180,19 @@ def quantize_apply(model):
   # TODO(pulkitb): Think more about how to introduce TFLite specific code.
   quantize_registry = tflite_quantize_registry.TFLiteQuantizeRegistry()
 
-  # TODO(pulkitb): Implement model transformation code here.
+  # TODO(tfmot):
+  # 1. Make use of QuantizationScheme instead of hardcoding
+  # transformations here.
+  # 2. Enable for Sequential when supported.
+  if not isinstance(model, keras.Sequential):
+    transforms = [
+        tflite_transforms.Conv2DBatchNormReLU6Fold(),
+        tflite_transforms.DepthwiseConv2DBatchNormReLU6Fold()
+    ]
+
+    with quantize_scope():
+      model_copy = model_transformer.ModelTransformer(
+          model_copy, transforms).transform()
 
   return keras.models.clone_model(
       model_copy, input_tensors=None, clone_function=_quantize)

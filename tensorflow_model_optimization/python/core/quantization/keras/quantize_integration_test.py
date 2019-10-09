@@ -24,11 +24,14 @@ from absl.testing import parameterized
 
 import numpy as np
 
+import tensorflow as tf
 from tensorflow.python import keras
 from tensorflow.python.platform import test
 
 from tensorflow_model_optimization.python.core.keras import test_utils
+from tensorflow_model_optimization.python.core.quantization.keras.layers import conv_batchnorm
 from tensorflow_model_optimization.python.core.quantization.keras import quantize
+from tensorflow_model_optimization.python.core.quantization.keras import utils
 
 quantize_annotate = quantize.quantize_annotate
 quantize_apply = quantize.quantize_apply
@@ -80,6 +83,27 @@ class QuantizeIntegrationTest(test.TestCase, parameterized.TestCase):
       loaded_model = keras.models.load_model(model_file)
 
     self._assert_models_equal(quantized_model, loaded_model)
+
+  def testProductionModelConversionToTFLite(self):
+    model = tf.keras.applications.mobilenet.MobileNet(weights=None)
+
+    # TODO(tfmot): potentially remove by having scoping call inside
+    # quantize_apply.
+    with quantize.quantize_scope():
+      annotated = quantize_annotate(model)
+      quantized_model = quantize_apply(annotated)
+
+    _, keras_file = tempfile.mkstemp('.h5')
+    _, tflite_file = tempfile.mkstemp('.h5')
+
+    keras.models.save_model(quantized_model, keras_file)
+
+    with quantize.quantize_scope():
+      custom_objects = {
+          '_DepthwiseConvBatchNorm2D': conv_batchnorm._DepthwiseConvBatchNorm2D,
+          '_ConvBatchNorm2D': conv_batchnorm._ConvBatchNorm2D
+      }
+      utils.convert_keras_to_tflite(keras_file, tflite_file, custom_objects)
 
 
 if __name__ == '__main__':

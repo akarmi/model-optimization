@@ -228,7 +228,9 @@ py_library(
         ":quantize_wrapper",
         # tensorflow dep1,
         # python/keras tensorflow dep2,
+        "//tensorflow_model_optimization/python/core/quantization/keras/graph_transformations:model_transformer",
         "//tensorflow_model_optimization/python/core/quantization/keras/tflite:tflite_quantize_registry",
+        "//tensorflow_model_optimization/python/core/quantization/keras/tflite:tflite_transforms",
     ],
 )
 
@@ -253,9 +255,11 @@ py_test(
     python_version = "PY3",
     deps = [
         ":quantize",
+        ":utils",
         # numpy dep1,
         # tensorflow dep1,
         "//tensorflow_model_optimization/python/core/keras:test_utils",
+        "//tensorflow_model_optimization/python/core/quantization/keras/layers:conv_batchnorm",
     ],
 )
 
